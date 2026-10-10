@@ -1,6 +1,12 @@
 # How To Secure A Linux Server
 
-An evolving how-to guide for securing a Linux server that, hopefully, also teaches you a little about security and why it matters.
+Practical Linux server hardening for home labs and self-hosted services: SSH, least privilege, updates, firewalls, logging, and auditing, with explanations of why each control matters.
+
+**Start here:** [Hardening checklist](CHECKLIST.md) · [Full guide](#table-of-contents) · [Contribute](CONTRIBUTING.md) · [Report a documentation issue](https://github.com/rbohling/How-To-Secure-A-Linux-Server/issues/new)
+
+This repository is Rhett Bohling's adaptation of [Anchal Nigam's original guide](https://github.com/imthenachoman/How-To-Secure-A-Linux-Server), shared under CC BY-SA 4.0. Original attribution and historical references are retained.
+
+> **Scope and status:** Examples primarily use Debian-style package management. Historical sections have not all been revalidated against current distributions. Check your installed version's documentation before applying commands; this guide does not certify CIS compliance. Keep a working console or recovery path and test changes in a disposable VM first.
 
 [![CC-BY-SA](https://i.creativecommons.org/l/by-sa/4.0/88x31.png)](#license)
 
@@ -186,7 +192,7 @@ Not all changes can be automated with `code` snippets. Those changes need good, 
 
 I wanted to put this guide on [GitHub](http://www.github.com) to make it easy to collaborate. The more folks that contribute, the better and more complete this guide will become.
 
-To contribute you can fork and submit a pull request or submit a [new issue](https://github.com/imthenachoman/How-To-Secure-A-Linux-Server/issues/new).
+To contribute you can fork and submit a pull request or submit a [new issue](https://github.com/rbohling/How-To-Secure-A-Linux-Server/issues/new).
 
 ([Table of Contents](#table-of-contents))
 
@@ -270,20 +276,15 @@ Using SSH public/private keys is more secure than using a password. It also make
 
 #### How It Works
 
-Check the references below for more details but, at a high level, public/private keys work by using a pair of keys to verify identity.
+SSH public-key authentication uses digital signatures. The client signs authentication data with its **private key**, and the server verifies the signature using an authorized **public key**. It is not a process of encrypting a challenge with the public key and decrypting it with the private key.
 
-1. One key, the **public** key, **can only encrypt data**, not decrypt it
-1. The other key, the **private** key, can decrypt the data
+Generate the key pair on the client. Keep the private key secret and protect it with a passphrase; the public key can be shared. Add the public key to the target account's `~/.ssh/authorized_keys` on the server, for example with `ssh-copy-id`. Verify the server's host-key fingerprint through a trusted channel before accepting it.
 
-For SSH, a public and private key is created on the client. You want to keep both keys secure, especially the private key. Even though the public key is meant to be public, it is wise to make sure neither keys fall in the wrong hands.
+Test public-key login in a second terminal before disabling password login. `PasswordAuthentication no` disables the password authentication method, but keyboard-interactive authentication may still allow passwords through PAM. Review `KbdInteractiveAuthentication`, `AuthenticationMethods`, and any `Match` blocks together. If you use PAM-based MFA, preserve the keyboard-interactive method required by your MFA configuration.
 
-When you connect to an SSH server, SSH will look for a public key that matches the client you're connecting from in the file `~/.ssh/authorized_keys` on the server you're connecting to. Notice the file is in the **home folder** of the ID you're trying to connect to. So, after creating the public key, you need to append it to `~/.ssh/authorized_keys`. One approach is to copy it to a USB stick and physically transfer it to the server. Anther approach is to use use [`ssh-copy-id`](https://www.ssh.com/ssh/copy-id) to transfer and append the public key.
+A passphrase-protected key can be used with `ssh-agent`; protect access to the agent and consider a limited key lifetime. For unattended tasks, use a dedicated account and restricted credentials rather than an unrestricted personal admin key.
 
-After the keys have been created and the public key has been appended to `~/.ssh/authorized_keys` on the host, SSH uses the public and private keys to verify identity and then establish a secure connection. How identity is verified is a complicated process but [Digital Ocean](https://www.digitalocean.com/community/tutorials/understanding-the-ssh-encryption-and-connection-process) has a very nice write-up of how it works. At a high level, identity is verified by the server encrypting a challenge message with the public key, then sending it to the client. If the client cannot decrypt the challenge message with the private key, the identity can't be verified and a connection will not be established.
-
-They are considered more secure because you need the private key to establish an SSH connection. If you set [`PasswordAuthentication no` in `/etc/ssh/sshd_config`](#PasswordAuthentication), then SSH won't let you connect without the private key.
-
-You can also set a pass-phrase for the keys which would require you to enter the key pass-phrase when connecting using public/private keys. Keep in mind doing this means you can't use the key for automation because you'll have no way to send the passphrase in your scripts. `ssh-agent` is a program that is shipped in many Linux distros (and usually already running) that will allow you to hold your unencrypted private key in memory for a configurable duration. Simply run `ssh-add` and it will prompt you for your passphrase. You will not be prompted for your passphrase again until the configurable duration has passed.
+References: [OpenSSH authentication](https://man.openbsd.org/ssh#AUTHENTICATION), [server configuration](https://man.openbsd.org/sshd_config), and [Ubuntu OpenSSH documentation](https://ubuntu.com/server/docs/how-to/security/openssh-server/).
 
 We will be using Ed25519 keys which, according to [https://linux-audit.com/](https://linux-audit.com/using-ed25519-openssh-keys-instead-of-dsa-rsa-ecdsa/):
 
@@ -535,11 +536,22 @@ SSH is a door into your server. This is especially true if you are opening ports
 
     Check `man sshd_config` for more details what these settings mean.
 
-1. Restart ssh:
+1. Before applying changes, keep your current SSH session open and confirm console access. Validate configuration syntax and review effective settings:
 
     ``` bash
-    sudo service sshd restart
+    sudo sshd -t
+    sudo sshd -T
     ```
+
+    If validation fails, fix or restore the configuration before proceeding. Review included configuration files and relevant `Match` blocks; use `sshd -T -C` with the intended connection parameters when evaluating conditional settings.
+
+1. Reload SSH using your distribution's service name. On systemd-based Debian/Ubuntu installations this is commonly:
+
+    ``` bash
+    sudo systemctl reload ssh
+    ```
+
+    Other distributions commonly use `sshd` instead of `ssh`. Confirm the service name locally. Test a fresh login and `sudo` in a second terminal before closing the original session.
 
 1. You can check verify the configurations worked with `sshd -T` and verify the output:
 
@@ -747,11 +759,22 @@ What we will do is tell the server's SSH PAM configuration to ask the user for t
     echo -e "\nChallengeResponseAuthentication yes         # added by $(whoami) on $(date +"%Y-%m-%d @ %H:%M:%S")" | sudo tee -a /etc/ssh/sshd_config
     ```
 
-1. Restart ssh:
+1. Before applying changes, keep your current SSH session open and confirm console access. Validate configuration syntax and review effective settings:
 
     ``` bash
-    sudo service sshd restart
+    sudo sshd -t
+    sudo sshd -T
     ```
+
+    If validation fails, fix or restore the configuration before proceeding. Review included configuration files and relevant `Match` blocks; use `sshd -T -C` with the intended connection parameters when evaluating conditional settings.
+
+1. Reload SSH using your distribution's service name. On systemd-based Debian/Ubuntu installations this is commonly:
+
+    ``` bash
+    sudo systemctl reload ssh
+    ```
+
+    Other distributions commonly use `sshd` instead of `ssh`. Confirm the service name locally. Test a fresh login and `sudo` in a second terminal before closing the original session.
 
 ([Table of Contents](#table-of-contents))
 
@@ -1842,7 +1865,7 @@ I won't provide [For the lazy](#editing-configuration-files---for-the-lazy) code
 
 #### Steps
 
-1. The sysctl settings can be found in the [linux-kernel-sysctl-hardening.md](https://github.com/imthenachoman/How-To-Secure-A-Linux-Server/blob/master/linux-kernel-sysctl-hardening.md) file in this repo.
+1. The sysctl settings can be found in the [linux-kernel-sysctl-hardening.md](linux-kernel-sysctl-hardening.md) file in this repo.
 
 1. Before you make a kernel sysctl change permanent, you can test it with the sysctl command:
 
@@ -2554,7 +2577,7 @@ There will come a time when you'll need to look through your iptables logs. Havi
 
 ### Contacting Me
 
-For any questions, comments, concerns, feedback, or issues, submit a [new issue](https://github.com/imthenachoman/How-To-Secure-A-Linux-Server/issues/new).
+For any questions, comments, concerns, feedback, or issues, submit a [new issue](https://github.com/rbohling/How-To-Secure-A-Linux-Server/issues/new).
 
 ([Table of Contents](#table-of-contents))
 
